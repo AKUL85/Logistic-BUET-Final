@@ -4,14 +4,51 @@ const cors = require("cors");
 const axios = require("axios");
 const db = require("./db");
 const { v4: uuidv4 } = require("uuid");
+const client = require('prom-client');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'code'],
+  buckets: [0.1, 0.5, 1, 2, 5]
+});
+register.registerMetric(httpRequestDuration);
+
 const PORT = 3000;
 const INVENTORY_SERVICE_URL =
   process.env.INVENTORY_SERVICE_URL || "http://inventory-service:3001";
+
+app.use((req, res, next) => {
+  const start = process.hrtime();
+  res.on('finish', () => {
+    const duration = process.hrtime(start);
+    const seconds = duration[0] + duration[1] / 1e9;
+    httpRequestDuration.observe({
+      method: req.method,
+      route: req.route ? req.route.path : req.url,
+      code: res.statusCode
+    }, seconds);
+  });
+  next();
+});
+
+// Chaos Middleware: Artificial Latency
+app.use(async (req, res, next) => {
+  if (req.query.latency) {
+    const ms = parseInt(req.query.latency);
+    if (ms > 0) {
+      await new Promise(resolve => setTimeout(resolve, ms));
+    }
+  }
+  next();
+});
 
 async function startDB() {
   const success = await db.init();
@@ -20,6 +57,46 @@ async function startDB() {
   }
 }
 startDB();
+
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
+app.get('/health', async (req, res) => {
+  const health = {
+    service: 'order-service',
+    status: 'healthy',
+    checks: {
+      database: 'unknown',
+      inventoryService: 'unknown'
+    }
+  };
+
+  let status = 200;
+
+  // Check DB
+  try {
+    await db.query('SELECT 1');
+    health.checks.database = 'connected';
+  } catch (e) {
+    health.checks.database = 'disconnected';
+    health.status = 'unhealthy';
+    status = 503;
+  }
+
+  // Check Inventory Service
+  try {
+    await axios.get(`${INVENTORY_SERVICE_URL}/health`, { timeout: 1000 });
+    health.checks.inventoryService = 'connected';
+  } catch (e) {
+    health.checks.inventoryService = 'disconnected';
+    health.status = 'unhealthy';
+    status = 503;
+  }
+
+  res.status(status).json(health);
+});
 
 async function reserveWithRetry(
   productId,

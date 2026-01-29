@@ -17,6 +17,23 @@ async function startDB() {
 }
 startDB();
 
+app.get('/health', async (req, res) => {
+    try {
+        const connection = await db.getConnection();
+        await connection.query('SELECT 1');
+        connection.release();
+        res.status(200).json({ status: 'healthy', service: 'inventory-service', database: 'connected' });
+    } catch (err) {
+        console.error('Health check failed:', err);
+        res.status(503).json({
+            status: 'unhealthy',
+            service: 'inventory-service',
+            database: 'disconnected',
+            error: err.message
+        });
+    }
+});
+
 app.post('/inventory/reserve', async (req, res) => {
     const { productId, quantity, idempotencyKey } = req.body;
 
