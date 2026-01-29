@@ -9,6 +9,10 @@ app.use(bodyParser.json());
 
 const PORT = 3001;
 
+// Gremlin Latency: Counter for deterministic delay pattern
+let requestCounter = 0;
+
+// Initialize DB with retry logic
 async function startDB() {
     const success = await db.init();
     if (!success) {
@@ -18,6 +22,18 @@ async function startDB() {
 startDB();
 
 app.post('/inventory/reserve', async (req, res) => {
+    // Gremlin Latency: Introduce delay on every 3rd request (deterministic pattern)
+    requestCounter++;
+    const shouldDelay = requestCounter % 3 === 0;
+    
+    if (shouldDelay) {
+        const delayMs = 6000; // 6 second delay to simulate network issues
+        console.log(`[GREMLIN LATENCY] Request #${requestCounter}: Delaying response by ${delayMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+    } else {
+        console.log(`[GREMLIN LATENCY] Request #${requestCounter}: Normal response`);
+    }
+    
     const { productId, quantity } = req.body;
 
     if (!productId || !quantity) {
