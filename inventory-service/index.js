@@ -124,6 +124,10 @@ app.post('/inventory', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Inventory Service running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`Inventory Service running on port ${PORT}`);
+    });
+}
+
+module.exports = app;
