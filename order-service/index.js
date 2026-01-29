@@ -22,7 +22,7 @@ startDB();
 
 async function reserveWithRetry(productId, quantity, idempotencyKey, attempt = 1) {
     const maxRetries = 10;
-    const timeout = 3000; // 3 seconds timeout per request
+    const timeout = 3000;
 
     try {
         const response = await axios.post(`${INVENTORY_SERVICE_URL}/inventory/reserve`, {
@@ -31,21 +31,19 @@ async function reserveWithRetry(productId, quantity, idempotencyKey, attempt = 1
             idempotencyKey
         }, {
             timeout: timeout,
-            params: { simulate_crash: process.env.SIMULATE_CRASH === 'true' && attempt === 1 } // Crash only on first attempt if flag set
+            params: { simulate_crash: process.env.SIMULATE_CRASH === 'true' && attempt === 1 }
         });
         return response;
     } catch (error) {
         const status = error.response?.status;
 
-        // Stop retrying on "Logical" failures
         if (status === 409 || status === 404 || status === 400 || status === 200) {
             throw error;
         }
 
-        // Retry on Network Errors or 5xx
         if (attempt <= maxRetries) {
             console.warn(`[Retry] Attempt ${attempt} failed. Retrying... (${error.message})`);
-            await new Promise(res => setTimeout(res, 1000)); // Wait 1s
+            await new Promise(res => setTimeout(res, 1000));
             return reserveWithRetry(productId, quantity, idempotencyKey, attempt + 1);
         }
 
@@ -60,18 +58,16 @@ app.post('/orders', async (req, res) => {
         return res.status(400).json({ error: 'Missing productId or quantity' });
     }
 
-    const idempotencyKey = uuidv4(); // Generate Unique ID per order
-    const orderId = uuidv4(); // Unique Order ID (though DB ID is auto-inc, this is logical ID)
+    const idempotencyKey = uuidv4();
+    const orderId = uuidv4();
 
     try {
         console.log(`Processing order for ${quantity} of ${productId}. Key: ${idempotencyKey}`);
 
         try {
-            // 1. Call Inventory Service with Retry Algorithm
             const inventoryResponse = await reserveWithRetry(productId, quantity, idempotencyKey);
 
             if (inventoryResponse.data.success) {
-                // 2. Save Order as PROCESSED
                 await db.query('INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)', [productId, quantity, 'PROCESSED']);
                 res.json({ success: true, message: 'Order created successfully', orderId, idempotencyKey });
             } else {
@@ -82,12 +78,10 @@ app.post('/orders', async (req, res) => {
             const errorMessage = apiError.response?.data?.message || 'Inventory service unavailable';
             const status = apiError.response?.status || 503;
 
-            // If 409, it's just out of stock, not a system failure
             if (status === 409) {
                 return res.status(409).json({ success: false, message: 'Out of Stock' });
             }
 
-            // Save as FAILED
             try {
                 await db.query('INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)', [productId, quantity, 'FAILED']);
             } catch (dbErr) {

@@ -32,7 +32,6 @@ class DatabaseService {
 
             this.pool = mysql.createPool({ ...dbConfig, database: dbName });
 
-            // Validate connection
             const poolConn = await this.pool.getConnection();
             console.log('Database connected!');
 
@@ -63,7 +62,6 @@ class DatabaseService {
             )
         `);
 
-        // Seed if empty
         const [rows] = await connection.query('SELECT count(*) as count FROM inventory');
         if (rows[0].count === 0) {
             console.log('Seeding initial inventory...');

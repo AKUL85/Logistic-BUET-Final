@@ -9,7 +9,6 @@ app.use(bodyParser.json());
 
 const PORT = 3001;
 
-// Initialize DB with retry logic
 async function startDB() {
     const success = await db.init();
     if (!success) {
@@ -25,13 +24,11 @@ app.post('/inventory/reserve', async (req, res) => {
         return res.status(400).json({ error: 'Missing productId, quantity, or idempotencyKey' });
     }
 
-    // CHECK-THEN-ACT Pattern inside Transaction
     let connection;
     try {
         connection = await db.getConnection();
         await connection.beginTransaction();
 
-        // 1. Check Idempotency Log
         const [existing] = await connection.query(
             'SELECT response_json FROM idempotency_log WHERE idempotency_key = ?',
             [idempotencyKey]
@@ -44,11 +41,10 @@ app.post('/inventory/reserve', async (req, res) => {
             return res.status(200).json(existing[0].response_json);
         }
 
-        // 2. Check Stock
         const [rows] = await connection.query(
             'SELECT quantity FROM inventory WHERE product_id = ? FOR UPDATE',
             [productId]
-        ); // Lock the row
+        );
 
         if (rows.length === 0) {
             await connection.rollback();
@@ -59,30 +55,24 @@ app.post('/inventory/reserve', async (req, res) => {
         const currentQuantity = rows[0].quantity;
 
         if (currentQuantity >= quantity) {
-            // 3. Deduct Stock
             await connection.query(
                 'UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?',
                 [quantity, productId]
             );
 
-            // 4. Log Idempotency
             const responsePayload = { success: true, message: 'Stock reserved', reserved: quantity };
             await connection.query(
                 'INSERT INTO idempotency_log (idempotency_key, response_json) VALUES (?, ?)',
                 [idempotencyKey, JSON.stringify(responsePayload)]
             );
 
-            // 5. Commit
             await connection.commit();
             console.log(`Reserved ${quantity} of ${productId}. Stock: ${currentQuantity - quantity}`);
 
-            // === CRASH SIMULATION ===
-            // Simulate Schrödinger's Warehouse: Commit passed, but process dies before response
             if (req.query.simulate_crash === 'true') {
                 console.error("💥 SIMULATING CRASH AFTER COMMIT 💥");
                 process.exit(1);
             }
-            // ========================
 
             connection.release();
             res.json(responsePayload);
@@ -121,7 +111,6 @@ app.post('/inventory', async (req, res) => {
     }
 
     try {
-        // Check if exists
         const [rows] = await db.query('SELECT * FROM inventory WHERE product_id = ?', [productId]);
         if (rows.length > 0) {
             return res.status(409).json({ error: 'Product already exists. Use /inventory/reserve to update stock.' });
