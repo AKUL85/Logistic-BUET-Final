@@ -1,6 +1,5 @@
 const request = require("supertest");
-const ORDER_SERVICE_URL =
-  process.env.ORDER_SERVICE_URL || "http://localhost:3000";
+const app = require("../index"); // import app directly
 
 describe("Order Service Load Test", () => {
   test("handle multiple concurrent orders", async () => {
@@ -13,7 +12,7 @@ describe("Order Service Load Test", () => {
         quantity: 1,
       };
       requests.push(
-        request(ORDER_SERVICE_URL)
+        request(app)
           .post("/orders")
           .send(payload)
           .then((res) => {
