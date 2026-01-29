@@ -19,6 +19,7 @@ jest.mock("axios");
 describe("Order Service Load Test", () => {
   beforeAll(async () => {
     // DB init is already mocked to succeed
+    jest.spyOn(global, "setInterval").mockImplementation(() => 0);
   });
 
   afterEach(() => {
@@ -27,6 +28,7 @@ describe("Order Service Load Test", () => {
 
   afterAll(async () => {
     // No cleanup needed for mocked db
+    global.setInterval.mockRestore();
   });
 
   it("should handle concurrent order creations", async () => {

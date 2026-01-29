@@ -12,17 +12,84 @@ app.use(bodyParser.json());
 const PORT = 3000;
 const INVENTORY_SERVICE_URL =
   process.env.INVENTORY_SERVICE_URL || "http://inventory-service:3001";
+const PENDING_RETRY_DELAY_MS = parseInt(
+  process.env.PENDING_RETRY_DELAY_MS || "10000",
+  10,
+);
 
 async function startDB() {
   const success = await db.init();
   if (!success) {
     setTimeout(startDB, 5000);
+    return;
   }
+
+  try {
+    await db.query("UPDATE orders SET status = ? WHERE status = ?", [
+      "PENDING",
+      "FAILED",
+    ]);
+  } catch (err) {
+    console.error("Failed to migrate FAILED orders:", err.message);
+  }
+
+  startPendingWorker();
 }
 startDB();
 
 // Track attempts for crash simulation
 let callCounter = 0;
+let pendingWorkerStarted = false;
+let pendingWorkerRunning = false;
+
+async function processPendingOrders() {
+  if (pendingWorkerRunning) return;
+  pendingWorkerRunning = true;
+
+  try {
+    const [pendingOrders] = await db.query(
+      "SELECT id, product_id, quantity FROM orders WHERE status = ? ORDER BY created_at ASC",
+      ["PENDING"],
+    );
+
+    for (const order of pendingOrders) {
+      try {
+        const idempotencyKey = uuidv4();
+        const inventoryResponse = await reserveWithRetry(
+          order.product_id,
+          order.quantity,
+          idempotencyKey,
+        );
+
+        if (inventoryResponse.data.success) {
+          await db.query("UPDATE orders SET status = ? WHERE id = ?", [
+            "PROCESSED",
+            order.id,
+          ]);
+        }
+      } catch (err) {
+        const status = err.response?.status;
+        if (status === 409) {
+          await db.query("UPDATE orders SET status = ? WHERE id = ?", [
+            "OUT_OF_STOCK",
+            order.id,
+          ]);
+        }
+        continue;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to process pending orders:", err.message);
+  } finally {
+    pendingWorkerRunning = false;
+  }
+}
+
+function startPendingWorker() {
+  if (pendingWorkerStarted) return;
+  pendingWorkerStarted = true;
+  setInterval(processPendingOrders, PENDING_RETRY_DELAY_MS);
+}
 
 async function reserveWithRetry(
   productId,
@@ -169,19 +236,29 @@ app.post("/orders", async (req, res) => {
           .json({ success: false, message: "Out of Stock" });
       }
 
-      // Save as FAILED
+      // Save as PENDING and retry later
       try {
-        await db.query(
+        const [result] = await db.query(
           "INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)",
-          [productId, quantity, "FAILED"],
+          [productId, quantity, "PENDING"],
         );
+        return res.status(202).json({
+          success: false,
+          pending: true,
+          message: "High Demand. Please check a bit later.",
+          orderDbId: result.insertId,
+        });
       } catch (dbErr) {
-        console.error("Failed to log failed order:", dbErr.message);
+        console.error("Failed to log pending order:", dbErr.message);
       }
 
       res
-        .status(status)
-        .json({ success: false, message: "Order failed: " + errorMessage });
+        .status(202)
+        .json({
+          success: false,
+          pending: true,
+          message: "High Demand. Please check a bit later.",
+        });
     }
   } catch (err) {
     console.error("Internal error:", err);

@@ -49,7 +49,11 @@ function App() {
         productId,
         quantity: parseInt(quantity)
       });
-      setMessage(`Success: ${res.data.message}`);
+      if (res.data?.pending) {
+        setMessage(res.data.message);
+      } else {
+        setMessage(`Success: ${res.data.message}`);
+      }
       fetchInventory();
       fetchOrders();
     } catch (err) {
