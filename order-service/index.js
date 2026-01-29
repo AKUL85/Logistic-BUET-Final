@@ -4,92 +4,102 @@ const cors = require("cors");
 const axios = require("axios");
 const db = require("./db");
 const { v4: uuidv4 } = require("uuid");
+const client = require('prom-client');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'code'],
+  buckets: [0.1, 0.5, 1, 2, 5]
+});
+register.registerMetric(httpRequestDuration);
+
 const PORT = 3000;
 const INVENTORY_SERVICE_URL =
   process.env.INVENTORY_SERVICE_URL || "http://inventory-service:3001";
-const PENDING_RETRY_DELAY_MS = parseInt(
-  process.env.PENDING_RETRY_DELAY_MS || "10000",
-  10,
-);
+
+app.use((req, res, next) => {
+  const start = process.hrtime();
+  res.on('finish', () => {
+    const duration = process.hrtime(start);
+    const seconds = duration[0] + duration[1] / 1e9;
+    httpRequestDuration.observe({
+      method: req.method,
+      route: req.route ? req.route.path : req.url,
+      code: res.statusCode
+    }, seconds);
+  });
+  next();
+});
+
+// Chaos Middleware: Artificial Latency
+app.use(async (req, res, next) => {
+  if (req.query.latency) {
+    const ms = parseInt(req.query.latency);
+    if (ms > 0) {
+      await new Promise(resolve => setTimeout(resolve, ms));
+    }
+  }
+  next();
+});
 
 async function startDB() {
   const success = await db.init();
   if (!success) {
     setTimeout(startDB, 5000);
-    return;
   }
-
-  try {
-    await db.query("UPDATE orders SET status = ? WHERE status = ?", [
-      "PENDING",
-      "FAILED",
-    ]);
-  } catch (err) {
-    console.error("Failed to migrate FAILED orders:", err.message);
-  }
-
-  startPendingWorker();
 }
 startDB();
 
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
+app.get('/health', async (req, res) => {
+  const health = {
+    service: 'order-service',
+    status: 'healthy',
+    checks: {
+      database: 'unknown',
+      inventoryService: 'unknown'
+    }
+  };
+
+  let status = 200;
+
+  // Check DB
+  try {
+    await db.query('SELECT 1');
+    health.checks.database = 'connected';
+  } catch (e) {
+    health.checks.database = 'disconnected';
+    health.status = 'unhealthy';
+    status = 503;
+  }
+
+  // Check Inventory Service
+  try {
+    await axios.get(`${INVENTORY_SERVICE_URL}/health`, { timeout: 1000 });
+    health.checks.inventoryService = 'connected';
+  } catch (e) {
+    health.checks.inventoryService = 'disconnected';
+    health.status = 'unhealthy';
+    status = 503;
+  }
+
+  res.status(status).json(health);
+});
+
 // Track attempts for crash simulation
 let callCounter = 0;
-let pendingWorkerStarted = false;
-let pendingWorkerRunning = false;
-
-async function processPendingOrders() {
-  if (pendingWorkerRunning) return;
-  pendingWorkerRunning = true;
-
-  try {
-    const [pendingOrders] = await db.query(
-      "SELECT id, product_id, quantity FROM orders WHERE status = ? ORDER BY created_at ASC",
-      ["PENDING"],
-    );
-
-    for (const order of pendingOrders) {
-      try {
-        const idempotencyKey = uuidv4();
-        const inventoryResponse = await reserveWithRetry(
-          order.product_id,
-          order.quantity,
-          idempotencyKey,
-        );
-
-        if (inventoryResponse.data.success) {
-          await db.query("UPDATE orders SET status = ? WHERE id = ?", [
-            "PROCESSED",
-            order.id,
-          ]);
-        }
-      } catch (err) {
-        const status = err.response?.status;
-        if (status === 409) {
-          await db.query("UPDATE orders SET status = ? WHERE id = ?", [
-            "OUT_OF_STOCK",
-            order.id,
-          ]);
-        }
-        continue;
-      }
-    }
-  } catch (err) {
-    console.error("Failed to process pending orders:", err.message);
-  } finally {
-    pendingWorkerRunning = false;
-  }
-}
-
-function startPendingWorker() {
-  if (pendingWorkerStarted) return;
-  pendingWorkerStarted = true;
-  setInterval(processPendingOrders, PENDING_RETRY_DELAY_MS);
-}
 
 async function reserveWithRetry(
   productId,
@@ -100,17 +110,13 @@ async function reserveWithRetry(
   const maxRetries = 10;
   const timeout = 3000; // 3 seconds timeout per request
   
-  // Only increment on the very first attempt of a new request call (or if logic allows)
-  // But wait, reserveWithRetry is recursive.
-  // We should probably track this outside validation.
-  // Ideally, distinct "orders" should increment the counter.
-  // If we increment here on attempt=1, it counts "Orders".
-  
+  // Only increment on the very first attempt of a new request call
   if(attempt === 1) callCounter++;
 
   try {
-    const shouldCrash = process.env.SIMULATE_CRASH === "true" && attempt === 1 && (callCounter % 4 === 0);
-    
+    // Crash every 5th request
+    const shouldCrash = process.env.SIMULATE_CRASH === "true" && attempt === 1 && (callCounter % 5 === 0);
+
     const response = await axios.post(
       `${INVENTORY_SERVICE_URL}/inventory/reserve`,
       {
@@ -122,7 +128,7 @@ async function reserveWithRetry(
         timeout: timeout,
         params: {
           simulate_crash: shouldCrash,
-        }, // Crash only every 4th order, on first attempt
+        }, // Crash only on first attempt if flag set
       },
     );
     return response;
@@ -146,39 +152,6 @@ async function reserveWithRetry(
     throw error;
   }
 }
-
-app.get('/health', async (req, res) => {
-    const healthStatus = {
-        status: 'UP',
-        database: 'connected',
-        inventoryService: 'connected'
-    };
-
-    let statusCode = 200;
-
-    try {
-        await db.query('SELECT 1');
-    } catch (err) {
-        healthStatus.database = 'disconnected';
-        healthStatus.status = 'DOWN';
-        healthStatus.error = err.message;
-        statusCode = 500;
-    }
-
-    try {
-        await axios.get(`${INVENTORY_SERVICE_URL}/health`, { timeout: 1000 });
-    } catch (err) {
-        healthStatus.inventoryService = 'disconnected';
-        // If inventory is down, overall service is degraded/down depending on strictness.
-        // Prompt says "verify downstream", implies we should report status.
-        // We'll mark as DOWN if a dependency is critical.
-        healthStatus.status = 'DOWN'; 
-        healthStatus.inventoryError = err.message;
-        statusCode = 500;
-    }
-
-    res.status(statusCode).json(healthStatus);
-});
 
 app.post("/orders", async (req, res) => {
   const { productId, quantity } = req.body;
@@ -236,29 +209,19 @@ app.post("/orders", async (req, res) => {
           .json({ success: false, message: "Out of Stock" });
       }
 
-      // Save as PENDING and retry later
+      // Save as FAILED
       try {
-        const [result] = await db.query(
+        await db.query(
           "INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)",
-          [productId, quantity, "PENDING"],
+          [productId, quantity, "FAILED"],
         );
-        return res.status(202).json({
-          success: false,
-          pending: true,
-          message: "High Demand. Please check a bit later.",
-          orderDbId: result.insertId,
-        });
       } catch (dbErr) {
-        console.error("Failed to log pending order:", dbErr.message);
+        console.error("Failed to log failed order:", dbErr.message);
       }
 
       res
-        .status(202)
-        .json({
-          success: false,
-          pending: true,
-          message: "High Demand. Please check a bit later.",
-        });
+        .status(status)
+        .json({ success: false, message: "Order failed: " + errorMessage });
     }
   } catch (err) {
     console.error("Internal error:", err);
