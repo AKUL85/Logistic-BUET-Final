@@ -1,7 +1,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const db = require('./db');
+const { initDB, getPool } = require("./database/connectDb");
+
 
 const app = express();
 app.use(cors());
@@ -9,15 +10,25 @@ app.use(bodyParser.json());
 
 const PORT = 3001;
 
-// Initialize DB with retry logic
 async function startDB() {
-    const success = await db.init();
-    if (!success) {
-        setTimeout(startDB, 5000);
-    }
-}
-startDB();
+  let success = false;
 
+  while (!success) {
+    success = await initDB();
+    if (!success) {
+      console.log("Retrying DB connection...");
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
+if (process.env.NODE_ENV !== "test") {
+  startDB();
+}
+
+
+
+// update quantity of a product
 app.post('/inventory/reserve', async (req, res) => {
     const { productId, quantity } = req.body;
 
@@ -26,7 +37,11 @@ app.post('/inventory/reserve', async (req, res) => {
     }
 
     try {
-        const [rows] = await db.query('SELECT quantity FROM inventory WHERE product_id = ?', [productId]);
+        const pool = getPool();
+        const [rows] = await pool.query(
+          "SELECT quantity FROM inventory WHERE product_id = ?",
+          [productId],
+        );
 
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Product not found' });
@@ -35,7 +50,7 @@ app.post('/inventory/reserve', async (req, res) => {
         const currentQuantity = rows[0].quantity;
 
         if (currentQuantity >= quantity) {
-            await db.query('UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?', [quantity, productId]);
+            await pool.query('UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?', [quantity, productId]);
             console.log(`Reserved ${quantity} of ${productId}. New stock: ${currentQuantity - quantity}`);
             res.json({ success: true, message: 'Stock reserved' });
         } else {
@@ -48,15 +63,18 @@ app.post('/inventory/reserve', async (req, res) => {
     }
 });
 
+// List all inventory
 app.get('/inventory', async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM inventory');
+        const pool = getPool();
+        const [rows] = await pool.query('SELECT * FROM inventory');
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
+// create new inventory
 app.post('/inventory', async (req, res) => {
     const { productId, quantity } = req.body;
 
@@ -66,12 +84,13 @@ app.post('/inventory', async (req, res) => {
 
     try {
         // Check if exists
-        const [rows] = await db.query('SELECT * FROM inventory WHERE product_id = ?', [productId]);
+        const pool = getPool();
+        const [rows] = await pool.query('SELECT * FROM inventory WHERE product_id = ?', [productId]);
         if (rows.length > 0) {
             return res.status(409).json({ error: 'Product already exists. Use /inventory/reserve to update stock.' });
         }
 
-        await db.query('INSERT INTO inventory (product_id, quantity) VALUES (?, ?)', [productId, quantity]);
+        await pool.query('INSERT INTO inventory (product_id, quantity) VALUES (?, ?)', [productId, quantity]);
         res.status(201).json({ success: true, message: 'Product added', productId, quantity });
     } catch (err) {
         console.error('Error adding inventory:', err);
@@ -79,6 +98,47 @@ app.post('/inventory', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Inventory Service running on port ${PORT}`);
+// delete a product from inventory
+app.delete('/inventory/:productId', async (req, res) => {
+    const { productId } = req.params;
+
+    if (!productId) {
+        return res.status(400).json({ error: 'Missing productId' });
+    }
+
+    try {
+        // Check if product exists
+        const pool = getPool();
+        const [rows] = await pool.query(
+            'SELECT * FROM inventory WHERE product_id = ?',
+            [productId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+
+        // Delete product
+        await pool.query(
+            'DELETE FROM inventory WHERE product_id = ?',
+            [productId]
+        );
+
+        console.log(`Product ${productId} deleted from inventory`);
+        res.json({ success: true, message: `Product ${productId} removed from inventory` });
+
+    } catch (err) {
+        console.error('Error deleting inventory:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
+
+
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    console.log(`Inventory Service running on port ${PORT}`);
+  });
+}
+
+
+module.exports = { app, startDB };
