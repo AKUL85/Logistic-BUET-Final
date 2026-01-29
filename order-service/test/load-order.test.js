@@ -1,6 +1,6 @@
 const request = require("supertest");
 const ORDER_SERVICE_URL =
-  process.env.ORDER_SERVICE_URL || "http://localhost:8000";
+  process.env.ORDER_SERVICE_URL || "http://localhost:3000";
 
 describe("Order Service Load Test", () => {
   test("handle multiple concurrent orders", async () => {
