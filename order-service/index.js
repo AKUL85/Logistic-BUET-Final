@@ -10,6 +10,7 @@ app.use(bodyParser.json());
 
 const PORT = 3000;
 const INVENTORY_SERVICE_URL = process.env.INVENTORY_SERVICE_URL || 'http://inventory-service:3001';
+const INVENTORY_TIMEOUT_MS = parseInt(process.env.INVENTORY_TIMEOUT_MS || '5000', 10); // 5 second timeout
 
 async function startDB() {
     const success = await db.init();
@@ -29,15 +30,16 @@ app.post('/orders', async (req, res) => {
     try {
         console.log(`Processing order for ${quantity} of ${productId}`);
 
-        // 1. Call Inventory Service
+        // 1. Call Inventory Service with timeout
         try {
             const inventoryResponse = await axios.post(`${INVENTORY_SERVICE_URL}/inventory/reserve`, {
                 productId,
                 quantity
+            }, {
+                timeout: INVENTORY_TIMEOUT_MS
             });
 
             if (inventoryResponse.data.success) {
-                // 2. Save Order as PROCESSED
                 await db.query('INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)', [productId, quantity, 'PROCESSED']);
                 res.json({ success: true, message: 'Order created successfully', orderId: 'generated-id' });
             } else {
@@ -45,17 +47,27 @@ app.post('/orders', async (req, res) => {
             }
         } catch (apiError) {
             console.error('Inventory service error:', apiError.message);
-            const errorMessage = apiError.response?.data?.message || 'Inventory service unavailable';
+            
+            let errorMessage;
+            let statusCode = 503;
+            
+            if (apiError.code === 'ECONNABORTED' || apiError.message.includes('timeout')) {
+                errorMessage = `High Demand. Inventory service timed out after ${INVENTORY_TIMEOUT_MS}ms. Please try again later.`;
+                console.warn(`[TIMEOUT] Inventory service did not respond within ${INVENTORY_TIMEOUT_MS}ms`);
+            } else if (apiError.response?.data?.message) {
+                errorMessage = apiError.response.data.message;
+                statusCode = apiError.response.status || 503;
+            } else {
+                errorMessage = 'Inventory service unavailable';
+            }
 
-            // Save as FAILED
-            // Note: If DB is down, this will throw, which is fine (Internal Server Error)
             try {
                 await db.query('INSERT INTO orders (product_id, quantity, status) VALUES (?, ?, ?)', [productId, quantity, 'FAILED']);
             } catch (dbErr) {
                 console.error('Failed to log failed order:', dbErr.message);
             }
 
-            res.status(503).json({ success: false, message: 'Order failed: ' + errorMessage });
+            res.status(statusCode).json({ success: false, message: 'Order failed: ' + errorMessage });
         }
 
     } catch (err) {

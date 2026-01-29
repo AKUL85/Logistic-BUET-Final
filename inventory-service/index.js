@@ -9,7 +9,6 @@ app.use(bodyParser.json());
 
 const PORT = 3001;
 
-// Initialize DB with retry logic
 async function startDB() {
     const success = await db.init();
     if (!success) {

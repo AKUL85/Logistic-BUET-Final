@@ -49,12 +49,12 @@ function App() {
         productId,
         quantity: parseInt(quantity)
       });
-      setMessage(`Success: ${res.data.message}`);
+      setMessage('Order successful');
       fetchInventory();
       fetchOrders();
     } catch (err) {
-      const errorMsg = err.response?.data?.message || err.message;
-      setMessage(`Error: ${errorMsg}`);
+      console.error("Order failed:", err);
+      setMessage("High demand. Please try again.");
     }
   };
 
