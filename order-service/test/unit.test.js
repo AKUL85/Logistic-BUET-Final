@@ -42,6 +42,14 @@ describe("Order Service Unit Tests", () => {
     });
   });
 
+    beforeAll(() => {
+        jest.spyOn(global, "setInterval").mockImplementation(() => 0);
+    });
+
+    afterAll(() => {
+        global.setInterval.mockRestore();
+    });
+
   describe("POST /orders", () => {
     const validOrder = { productId: "p1", quantity: 2 };
 
@@ -138,15 +146,16 @@ describe("Order Service Unit Tests", () => {
         
         const res = await request(app).post("/orders").send(validOrder);
 
-        expect(res.status).toBe(500);
+        expect(res.status).toBe(202);
         // 1 initial + 10 retries = 11 calls
         expect(axios.post).toHaveBeenCalledTimes(11); 
         expect(res.body.success).toBe(false);
+        expect(res.body.pending).toBe(true);
         
         setTimeoutSpy.mockRestore();
     });
 
-    it("should save order as FAILED if inventory fails permanently", async () => {
+    it("should save order as PENDING if inventory fails permanently", async () => {
          const setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((cb) => cb());
          
          axios.post.mockRejectedValue({ response: { status: 500 } });
@@ -154,11 +163,11 @@ describe("Order Service Unit Tests", () => {
 
          const res = await request(app).post("/orders").send(validOrder);
          
-         expect(res.status).toBe(500);
-         // Check DB insert with FAILED
+         expect(res.status).toBe(202);
+         // Check DB insert with PENDING
          expect(db.query).toHaveBeenCalledWith(
             expect.stringContaining("INSERT INTO orders"),
-            expect.arrayContaining(["p1", 2, "FAILED"])
+            expect.arrayContaining(["p1", 2, "PENDING"])
         );
         
         setTimeoutSpy.mockRestore();
