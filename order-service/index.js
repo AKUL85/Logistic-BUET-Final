@@ -21,6 +21,9 @@ async function startDB() {
 }
 startDB();
 
+// Track attempts for crash simulation
+let callCounter = 0;
+
 async function reserveWithRetry(
   productId,
   quantity,
@@ -29,8 +32,18 @@ async function reserveWithRetry(
 ) {
   const maxRetries = 10;
   const timeout = 3000; // 3 seconds timeout per request
+  
+  // Only increment on the very first attempt of a new request call (or if logic allows)
+  // But wait, reserveWithRetry is recursive.
+  // We should probably track this outside validation.
+  // Ideally, distinct "orders" should increment the counter.
+  // If we increment here on attempt=1, it counts "Orders".
+  
+  if(attempt === 1) callCounter++;
 
   try {
+    const shouldCrash = process.env.SIMULATE_CRASH === "true" && attempt === 1 && (callCounter % 4 === 0);
+    
     const response = await axios.post(
       `${INVENTORY_SERVICE_URL}/inventory/reserve`,
       {
@@ -41,9 +54,8 @@ async function reserveWithRetry(
       {
         timeout: timeout,
         params: {
-          simulate_crash:
-            process.env.SIMULATE_CRASH === "true" && attempt === 1,
-        }, // Crash only on first attempt if flag set
+          simulate_crash: shouldCrash,
+        }, // Crash only every 4th order, on first attempt
       },
     );
     return response;
@@ -67,6 +79,39 @@ async function reserveWithRetry(
     throw error;
   }
 }
+
+app.get('/health', async (req, res) => {
+    const healthStatus = {
+        status: 'UP',
+        database: 'connected',
+        inventoryService: 'connected'
+    };
+
+    let statusCode = 200;
+
+    try {
+        await db.query('SELECT 1');
+    } catch (err) {
+        healthStatus.database = 'disconnected';
+        healthStatus.status = 'DOWN';
+        healthStatus.error = err.message;
+        statusCode = 500;
+    }
+
+    try {
+        await axios.get(`${INVENTORY_SERVICE_URL}/health`, { timeout: 1000 });
+    } catch (err) {
+        healthStatus.inventoryService = 'disconnected';
+        // If inventory is down, overall service is degraded/down depending on strictness.
+        // Prompt says "verify downstream", implies we should report status.
+        // We'll mark as DOWN if a dependency is critical.
+        healthStatus.status = 'DOWN'; 
+        healthStatus.inventoryError = err.message;
+        statusCode = 500;
+    }
+
+    res.status(statusCode).json(healthStatus);
+});
 
 app.post("/orders", async (req, res) => {
   const { productId, quantity } = req.body;
