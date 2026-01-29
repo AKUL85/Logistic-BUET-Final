@@ -34,6 +34,7 @@ services:
       DB_PASSWORD: password
       DB_NAME: order_db
       INVENTORY_SERVICE_URL: http://inventory-service:3001
+      SIMULATE_CRASH: "true"
     depends_on:
       - mysql-order
       - inventory-service
@@ -43,6 +44,7 @@ services:
   inventory-service:
     build: ./inventory-service
     container_name: inventory-service
+    restart: on-failure
     ports:
       - "3001:3001"
     environment:

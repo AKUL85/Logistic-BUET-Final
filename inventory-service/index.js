@@ -19,32 +19,88 @@ async function startDB() {
 startDB();
 
 app.post('/inventory/reserve', async (req, res) => {
-    const { productId, quantity } = req.body;
+    const { productId, quantity, idempotencyKey } = req.body;
 
-    if (!productId || !quantity) {
-        return res.status(400).json({ error: 'Missing productId or quantity' });
+    if (!productId || !quantity || !idempotencyKey) {
+        return res.status(400).json({ error: 'Missing productId, quantity, or idempotencyKey' });
     }
 
+    // CHECK-THEN-ACT Pattern inside Transaction
+    let connection;
     try {
-        const [rows] = await db.query('SELECT quantity FROM inventory WHERE product_id = ?', [productId]);
+        connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Check Idempotency Log
+        const [existing] = await connection.query(
+            'SELECT response_json FROM idempotency_log WHERE idempotency_key = ?',
+            [idempotencyKey]
+        );
+
+        if (existing.length > 0) {
+            await connection.rollback();
+            connection.release();
+            console.log(`[Idempotency] Returning cached response for key: ${idempotencyKey}`);
+            return res.status(200).json(existing[0].response_json);
+        }
+
+        // 2. Check Stock
+        const [rows] = await connection.query(
+            'SELECT quantity FROM inventory WHERE product_id = ? FOR UPDATE',
+            [productId]
+        ); // Lock the row
 
         if (rows.length === 0) {
+            await connection.rollback();
+            connection.release();
             return res.status(404).json({ error: 'Product not found' });
         }
 
         const currentQuantity = rows[0].quantity;
 
         if (currentQuantity >= quantity) {
-            await db.query('UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?', [quantity, productId]);
-            console.log(`Reserved ${quantity} of ${productId}. New stock: ${currentQuantity - quantity}`);
-            res.json({ success: true, message: 'Stock reserved' });
+            // 3. Deduct Stock
+            await connection.query(
+                'UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?',
+                [quantity, productId]
+            );
+
+            // 4. Log Idempotency
+            const responsePayload = { success: true, message: 'Stock reserved', reserved: quantity };
+            await connection.query(
+                'INSERT INTO idempotency_log (idempotency_key, response_json) VALUES (?, ?)',
+                [idempotencyKey, JSON.stringify(responsePayload)]
+            );
+
+            // 5. Commit
+            await connection.commit();
+            console.log(`Reserved ${quantity} of ${productId}. Stock: ${currentQuantity - quantity}`);
+
+            // === CRASH SIMULATION ===
+            // Simulate Schrödinger's Warehouse: Commit passed, but process dies before response
+            if (req.query.simulate_crash === 'true') {
+                console.error("💥 SIMULATING CRASH AFTER COMMIT 💥");
+                process.exit(1);
+            }
+            // ========================
+
+            connection.release();
+            res.json(responsePayload);
+
         } else {
-            console.log(`Failed to reserve ${quantity} of ${productId}. Current stock: ${currentQuantity}`);
-            res.status(400).json({ success: false, message: 'Insufficient stock' });
+            await connection.rollback();
+            connection.release();
+            console.log(`Insufficient stock for ${productId}. Req: ${quantity}, Avail: ${currentQuantity}`);
+            res.status(409).json({ success: false, message: 'Insufficient stock' });
         }
+
     } catch (err) {
-        console.error('Error reserving inventory:', err.message);
-        res.status(500).json({ error: err.message === 'Database not ready' ? 'Service Unavailable' : 'Internal server error' });
+        console.error('Error reserving inventory:', err);
+        if (connection) {
+            try { await connection.rollback(); } catch (e) { }
+            try { connection.release(); } catch (e) { }
+        }
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
