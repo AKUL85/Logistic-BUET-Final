@@ -32,7 +32,6 @@ class DatabaseService {
 
             this.pool = mysql.createPool({ ...dbConfig, database: dbName });
 
-            // Validate connection
             const poolConn = await this.pool.getConnection();
             console.log('Database connected!');
 
@@ -54,7 +53,15 @@ class DatabaseService {
             )
         `);
 
-        // Seed if empty
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS idempotency_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+                response_json JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         const [rows] = await connection.query('SELECT count(*) as count FROM inventory');
         if (rows[0].count === 0) {
             console.log('Seeding initial inventory...');
@@ -67,6 +74,11 @@ class DatabaseService {
     async query(sql, params) {
         if (!this.pool) throw new Error('Database not ready');
         return this.pool.query(sql, params);
+    }
+
+    async getConnection() {
+        if (!this.pool) throw new Error('Database not ready');
+        return this.pool.getConnection();
     }
 }
 

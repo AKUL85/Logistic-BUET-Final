@@ -36,30 +36,77 @@ app.post('/inventory/reserve', async (req, res) => {
     
     const { productId, quantity } = req.body;
 
-    if (!productId || !quantity) {
-        return res.status(400).json({ error: 'Missing productId or quantity' });
+    if (!productId || !quantity || !idempotencyKey) {
+        return res.status(400).json({ error: 'Missing productId, quantity, or idempotencyKey' });
     }
 
+    let connection;
     try {
-        const [rows] = await db.query('SELECT quantity FROM inventory WHERE product_id = ?', [productId]);
+        connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        const [existing] = await connection.query(
+            'SELECT response_json FROM idempotency_log WHERE idempotency_key = ?',
+            [idempotencyKey]
+        );
+
+        if (existing.length > 0) {
+            await connection.rollback();
+            connection.release();
+            console.log(`[Idempotency] Returning cached response for key: ${idempotencyKey}`);
+            return res.status(200).json(existing[0].response_json);
+        }
+
+        const [rows] = await connection.query(
+            'SELECT quantity FROM inventory WHERE product_id = ? FOR UPDATE',
+            [productId]
+        );
 
         if (rows.length === 0) {
+            await connection.rollback();
+            connection.release();
             return res.status(404).json({ error: 'Product not found' });
         }
 
         const currentQuantity = rows[0].quantity;
 
         if (currentQuantity >= quantity) {
-            await db.query('UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?', [quantity, productId]);
-            console.log(`Reserved ${quantity} of ${productId}. New stock: ${currentQuantity - quantity}`);
-            res.json({ success: true, message: 'Stock reserved' });
+            await connection.query(
+                'UPDATE inventory SET quantity = quantity - ? WHERE product_id = ?',
+                [quantity, productId]
+            );
+
+            const responsePayload = { success: true, message: 'Stock reserved', reserved: quantity };
+            await connection.query(
+                'INSERT INTO idempotency_log (idempotency_key, response_json) VALUES (?, ?)',
+                [idempotencyKey, JSON.stringify(responsePayload)]
+            );
+
+            await connection.commit();
+            console.log(`Reserved ${quantity} of ${productId}. Stock: ${currentQuantity - quantity}`);
+
+            if (req.query.simulate_crash === 'true') {
+                console.error("💥 SIMULATING CRASH AFTER COMMIT 💥");
+                process.exit(1);
+            }
+
+            connection.release();
+            res.json(responsePayload);
+
         } else {
-            console.log(`Failed to reserve ${quantity} of ${productId}. Current stock: ${currentQuantity}`);
-            res.status(400).json({ success: false, message: 'Insufficient stock' });
+            await connection.rollback();
+            connection.release();
+            console.log(`Insufficient stock for ${productId}. Req: ${quantity}, Avail: ${currentQuantity}`);
+            res.status(409).json({ success: false, message: 'Insufficient stock' });
         }
+
     } catch (err) {
-        console.error('Error reserving inventory:', err.message);
-        res.status(500).json({ error: err.message === 'Database not ready' ? 'Service Unavailable' : 'Internal server error' });
+        console.error('Error reserving inventory:', err);
+        if (connection) {
+            try { await connection.rollback(); } catch (e) { }
+            try { connection.release(); } catch (e) { }
+        }
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -80,7 +127,6 @@ app.post('/inventory', async (req, res) => {
     }
 
     try {
-        // Check if exists
         const [rows] = await db.query('SELECT * FROM inventory WHERE product_id = ?', [productId]);
         if (rows.length > 0) {
             return res.status(409).json({ error: 'Product already exists. Use /inventory/reserve to update stock.' });
@@ -94,6 +140,10 @@ app.post('/inventory', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Inventory Service running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`Inventory Service running on port ${PORT}`);
+    });
+}
+
+module.exports = app;
