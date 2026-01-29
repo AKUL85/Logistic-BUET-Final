@@ -1,0 +1,11 @@
+groups:
+  - name: order-service-rules
+    rules:
+      - alert: HighLatency
+        expr: rate(http_request_duration_seconds_sum[30s]) / rate(http_request_duration_seconds_count[30s]) > 1
+        for: 5s
+        labels:
+          severity: critical
+        annotations:
+          summary: "High Latency in Order Service"
+          description: "Average request latency is above 1s (current value: {{ $value }}s)"

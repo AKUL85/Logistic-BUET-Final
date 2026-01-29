@@ -19,10 +19,18 @@ startDB();
 
 app.get('/health', async (req, res) => {
     try {
-        await db.query('SELECT 1');
-        res.status(200).json({ status: 'UP', database: 'connected' });
+        const connection = await db.getConnection();
+        await connection.query('SELECT 1');
+        connection.release();
+        res.status(200).json({ status: 'healthy', service: 'inventory-service', database: 'connected' });
     } catch (err) {
-        res.status(500).json({ status: 'DOWN', database: 'disconnected', error: err.message });
+        console.error('Health check failed:', err);
+        res.status(503).json({
+            status: 'unhealthy',
+            service: 'inventory-service',
+            database: 'disconnected',
+            error: err.message
+        });
     }
 });
 
